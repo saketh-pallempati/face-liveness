@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FaceMatcher,
   LabeledFaceDescriptors,
@@ -9,187 +10,159 @@ import {
   loadSsdMobilenetv1Model,
   matchDimensions,
   resizeResults,
-  TinyFaceDetectorOptions,
-} from 'face-api.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+} from "face-api.js";
 
-const MODEL_URL = '/models';
+import * as tf from "@tensorflow/tfjs";
+import styles from "./faceRecognition.module.scss";
+
+const MODEL_URL = "/models";
 const FACE_MATCHER_THRESHOLD = 0.6;
-const VALID_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-
-import styles from './faceRecognition.module.scss';
+const VALID_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
 export default function FaceRecognition() {
-  const [dataSetImages, setDataSetImages] = useState<Array<any>>([]);
-  const [faceMatcher, setFaceMatcher] = useState<FaceMatcher | null>(null);
+  const [dataSetImages, setDataSetImages] = useState([]);
+  const [faceMatcher, setFaceMatcher] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [loaderMsg, setLoaderMsg] = useState('');
-  const [queryImage, setQueryImage] = useState<string | null>(null);
-  const [recognitionError, setRecognitionError] = useState('');
-  const [livenessDetected, setLivenessDetected] = useState(false);
+  const [loaderMsg, setLoaderMsg] = useState("");
+  const [recognitionError, setRecognitionError] = useState("");
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const queryCanvasElement = useRef<HTMLCanvasElement | null>(null);
-  const queryImageElement = useRef<HTMLImageElement | null>(null);
-  const refImgElements = useRef<(HTMLImageElement | null)[]>([]);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const refImgElements = useRef([]);
 
-  const addImageRef = (index: number, ref: HTMLImageElement | null) => {
+  const addImageRef = (index, ref) => {
     refImgElements.current[index] = ref;
   };
 
   const processImagesForRecognition = useCallback(async () => {
     if (!dataSetImages) return;
     setIsLoading(true);
-    setLoaderMsg('Please wait while images are being processed...');
+    setLoaderMsg("Please wait while images are being processed...");
     let labeledFaceDescriptors = [];
-    labeledFaceDescriptors = await Promise.all(
-      refImgElements.current?.map(async (imageEle) => {
-        if (imageEle) {
-          const label = imageEle?.alt.split(' ')[0];
-          const faceDescription = await detectSingleFace(imageEle)
-            .withFaceLandmarks()
-            .withFaceDescriptor();
-          if (!faceDescription) {
-            throw new Error(`no faces detected for ${label}`);
+    try {
+      labeledFaceDescriptors = await Promise.all(
+        refImgElements.current?.map(async (imageEle) => {
+          if (imageEle) {
+            const label = imageEle?.alt.split(" ")[0];
+            const faceDescription = await detectSingleFace(imageEle)
+              .withFaceLandmarks()
+              .withFaceDescriptor();
+            if (!faceDescription) {
+              throw new Error(`No faces detected for ${label}`);
+            }
+
+            const faceDescriptors = [faceDescription.descriptor];
+            return new LabeledFaceDescriptors(label, faceDescriptors);
           }
+        })
+      );
 
-          const faceDescriptors = [faceDescription.descriptor];
-          return new LabeledFaceDescriptors(label, faceDescriptors);
-        }
-      })
-    );
+      labeledFaceDescriptors = labeledFaceDescriptors.filter(
+        (desc) => desc !== undefined
+      );
 
-    const faceMatcher = new FaceMatcher(
-      labeledFaceDescriptors,
-      FACE_MATCHER_THRESHOLD
-    );
+      const matcher = new FaceMatcher(
+        labeledFaceDescriptors,
+        FACE_MATCHER_THRESHOLD
+      );
 
-    setFaceMatcher(faceMatcher);
-    setIsLoading(false);
+      setFaceMatcher(matcher);
+      setIsLoading(false);
+    } catch (error) {
+      console.error("Error processing images for recognition:", error);
+      setRecognitionError("Failed to process images for face recognition.");
+      setIsLoading(false);
+    }
   }, [dataSetImages]);
 
-  const detectLiveness = async () => {
-    if (videoRef.current) {
-      const detections = await detectAllFaces(videoRef.current, new TinyFaceDetectorOptions())
-        .withFaceLandmarks()
-        .withFaceExpressions();
-
-      if (detections.length > 0) {
-        const expressions = detections[0].expressions;
-        const isBlinking = expressions.neutral > 0.5 && (expressions.happy > 0.1 || expressions.surprised > 0.1);
-        setLivenessDetected(isBlinking);
+  const startVideo = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
       }
+    } catch (err) {
+      console.error("Error accessing the camera", err);
+      setRecognitionError(
+        "Failed to access the camera. Please check your permissions."
+      );
     }
   };
 
-  const startVideo = () => {
-    navigator.mediaDevices.getUserMedia({ video: {} })
-      .then(stream => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      })
-      .catch(err => console.error('Error accessing webcam: ', err));
-  };
+  const detectFaces = async () => {
+    if (!videoRef.current || !canvasRef.current || !faceMatcher) return;
 
-  const loadRecognizedFaces = async () => {
-    if (dataSetImages.length === 0) {
-      setRecognitionError('No data set found for recognition.');
-    } else if (!queryImageElement.current) {
-      setRecognitionError('Please upload query image for recognition.');
-    }
-    if (
-      queryCanvasElement.current &&
-      queryImageElement.current &&
-      faceMatcher
-    ) {
-      setRecognitionError('');
-      const resultsQuery = await detectAllFaces(queryImageElement.current)
+    try {
+      const detections = await detectAllFaces(videoRef.current)
         .withFaceLandmarks()
         .withFaceDescriptors();
 
-      await matchDimensions(
-        queryCanvasElement.current,
-        queryImageElement.current
-      );
+      const canvas = canvasRef.current;
+      matchDimensions(canvas, videoRef.current);
 
-      const results = await resizeResults(resultsQuery, {
-        width: (queryImageElement.current as HTMLImageElement).width,
-        height: (queryImageElement.current as HTMLImageElement).height,
+      const resizedDetections = resizeResults(detections, {
+        width: videoRef.current.width,
+        height: videoRef.current.height,
       });
 
-      const queryDrawBoxes = results.map((res) => {
-        const bestMatch = faceMatcher.findBestMatch(res.descriptor);
-        return new draw.DrawBox(res.detection.box, {
-          label: bestMatch.toString(),
-        });
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      resizedDetections.forEach((detection) => {
+        const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+        const isKnownPerson = bestMatch.label !== "unknown";
+        const label = `${bestMatch.toString()} | ${isKnownPerson ? 'Live' : 'Not Live'}`;
+        
+        const drawBox = new draw.DrawBox(detection.detection.box, { label });
+        drawBox.draw(canvas);
       });
 
-      queryDrawBoxes.forEach((drawBox) =>
-        drawBox.draw(
-          queryCanvasElement.current as unknown as HTMLCanvasElement
-        )
-      );
-
-      // Detect liveness
-      await detectLiveness();
+      requestAnimationFrame(detectFaces);
+    } catch (error) {
+      console.error("Error during face detection:", error);
+      setRecognitionError("Error during face detection.");
     }
-    setIsLoading(false);
   };
 
-  const setImagesForRecognition = (event: any) => {
+  const setImagesForRecognition = (event) => {
     const files = Array.from(event.target.files || []);
-
-    // Limit the number of selected images
-    if (files.length > 20) {
-      setRecognitionError('You can select a maximum of 20 images.');
-      return;
-    }
-
-    if (files) {
-      const images = [];
-      refImgElements.current = [];
-      setRecognitionError('');
-      for (let index = 0; index < event.target.files.length; index++) {
-        const image = event.target.files[index];
-        if (VALID_IMAGE_TYPES.includes(image.type)) {
-          images.push({
-            name: image.name,
-            src: URL.createObjectURL(image),
-          });
-        }
-      }
-      setDataSetImages(images);
-    }
-  };
-
-  const handleQueryImage = (event: any) => {
-    if (event?.target?.files && event?.target?.files[0]) {
-      setRecognitionError('');
-      const image = event.target.files[0];
-      setQueryImage(URL.createObjectURL(image));
-      if (queryCanvasElement.current) {
-        const canvasEle = (
-          queryCanvasElement.current as any
-        ).getContext('2d');
-        canvasEle?.reset();
+    const images = [];
+    refImgElements.current = [];
+    setRecognitionError("");
+    for (let index = 0; index < event.target.files.length; index++) {
+      const image = event.target.files[index];
+      if (VALID_IMAGE_TYPES.includes(image.type)) {
+        images.push({
+          name: image.name,
+          src: URL.createObjectURL(image),
+        });
       }
     }
+    setDataSetImages(images);
   };
 
   const loadModels = async () => {
-    setLoaderMsg('Please wait while SSD Mobile net model is loading...');
-    await loadSsdMobilenetv1Model(MODEL_URL);
-    setLoaderMsg('Please wait while face landmark model is loading...');
-    await loadFaceLandmarkModel(MODEL_URL);
-    setLoaderMsg('Please wait while face expression model is loading...');
-    await loadFaceRecognitionModel(MODEL_URL);
-    setIsLoading(false);
+    try {
+      setLoaderMsg("Please wait while SSD MobileNet model is loading...");
+      await loadSsdMobilenetv1Model(MODEL_URL);
+
+      setLoaderMsg("Please wait while face landmark model is loading...");
+      await loadFaceLandmarkModel(MODEL_URL);
+
+      setLoaderMsg("Please wait while face recognition model is loading...");
+      await loadFaceRecognitionModel(MODEL_URL);
+
+      setLoaderMsg("");
+      setIsLoading(false);
+    } catch (error) {
+      console.error("Error loading models:", error);
+      setRecognitionError("Failed to load face recognition models.");
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
     loadModels();
-    startVideo();
   }, []);
 
   useEffect(() => {
@@ -199,140 +172,106 @@ export default function FaceRecognition() {
   }, [dataSetImages, processImagesForRecognition]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      detectLiveness();
-    }, 1000); // Check for liveness every second
-    return () => clearInterval(interval);
-  }, []);
+    if (faceMatcher) {
+      startVideo();
+    }
+  }, [faceMatcher]);
+
+  useEffect(() => {
+    if (videoRef.current && faceMatcher) {
+      videoRef.current.addEventListener("play", detectFaces);
+    }
+    return () => {
+      if (videoRef.current) {
+        videoRef.current.removeEventListener("play", detectFaces);
+      }
+    };
+  }, [faceMatcher]);
 
   return (
     <>
       {isLoading && <div>{loaderMsg}</div>}
       <div className={`container ${styles.container}`}>
-        <div
-          className={`${styles.imageSection} ${styles.multiImageSection}`}>
+        <div className={`${styles.imageSection} ${styles.multiImageSection}`}>
           <div className={styles.twoSectionPreview}>
             <div className={styles.dataSetSection}>
               <h4>Original Data</h4>
               <div>
-                {dataSetImages?.map((image, index) => {
-                  return (
-                    <div
-                      className={styles.imageArea}
-                      key={`data-set-${index}`}>
-                      <img
-                        ref={(imageRef) =>
-                          addImageRef(index, imageRef)
-                        }
-                        src={image.src}
-                        alt={image.name}
-                        width={100}
-                        height={100}
-                      />
-                      <span>{image.name}</span>
-                    </div>
-                  );
-                })}
+                {dataSetImages?.map((image, index) => (
+                  <div className={styles.imageArea} key={`data-set-${index}`}>
+                    <img
+                      ref={(imageRef) => addImageRef(index, imageRef)}
+                      src={image.src}
+                      alt={image.name}
+                    />
+                    <span>{image.name}</span>
+                  </div>
+                ))}
               </div>
-              <label
-                htmlFor='multiFileSelect'
-                className={styles.fileUpload}>
+              <label htmlFor="multiFileSelect" className={styles.fileUpload}>
                 <span>
-                  <i className='bi bi-upload'></i>
+                  <i className="bi bi-upload"></i>
                 </span>
                 Upload image data set for face recognition
               </label>
               <input
-                id='multiFileSelect'
-                type='file'
+                id="multiFileSelect"
+                type="file"
                 onChange={setImagesForRecognition}
                 multiple
-                accept='image/jpeg, image/png, image/webp'
+                accept="image/jpeg, image/png, image/webp"
                 hidden
               />
             </div>
             <div className={styles.queryImageSection}>
-              <h4>Query Image</h4>
-              <div>
-                {queryImage && (
-                  <>
-                    <img
-                      ref={queryImageElement}
-                      src={queryImage}
-                      alt='Image to be recognized for face, Face Recognition'
-                      width={500}
-                      height={500}
-                    />
-                    <canvas
-                      ref={queryCanvasElement}
-                      className={styles.canvas}
-                      width={500}
-                      height={500}
-                    />
-                  </>
-                )}
+              <h4>Video Feed</h4>
+              <div className={styles.videoContainer}>
+                <video
+                  ref={videoRef}
+                  width={500}
+                  height={500}
+                  autoPlay
+                  muted
+                  className={styles.video}
+                />
+                <canvas
+                  ref={canvasRef}
+                  className={styles.canvas}
+                  width={500}
+                  height={500}
+                />
               </div>
-              <label
-                htmlFor='queryImage'
-                className={styles.fileUpload}>
-                <span>
-                  <i className='bi bi-upload'></i>
-                </span>
-                Upload query image for face recognition
-              </label>
-              <input
-                id='queryImage'
-                type='file'
-                accept='image/jpeg, image/png, image/webp'
-                onChange={handleQueryImage}
-                hidden
-              />
             </div>
           </div>
-          <div className={styles.buttonContainer}>
-            <button
-              className='btn btn-primary'
-              onClick={() => loadRecognizedFaces()}>
-              Recognize Face
-            </button>
-          </div>
           {recognitionError && (
-            <div className='alert alert-danger' role='alert'>
+            <div className="alert alert-danger" role="alert">
               {recognitionError}
             </div>
           )}
-          {livenessDetected && (
-            <div className='alert alert-success' role='alert'>
-              Liveness detected!
-            </div>
-          )}
           <div>
-            <b>Note</b>: Assume the data set as the Aadhar dataset with all the images
+            <b>Note</b>: Assume the data set as the Aadhar dataset with all the
+            images
             <ol>
-              <li>Image should be of single person only.</li>
+              <li>Image should be of a single person only.</li>
               <li>
-                Name of the file/image is considered to
-                recognize the person from query image.
+                Name of the file/image is considered to recognize the person
+                from video feed.
               </li>
               <li>
-                For example, image is uploaded with file name
-                neeraj.jpg, neeraj (1).jpg, vageele.jpg, etc.
-                the label will show neeraj if face is matched
-                from data ser in query image.
+                For example, image is uploaded with file name neeraj.jpg, neeraj
+                (1).jpg, vageele.jpg, etc. the label will show neeraj if face is
+                matched from data set in video feed.
               </li>
             </ol>
             <b>Privacy Notice:</b>
             <ul>
               <li>
-                Uploaded Image are not saved or collected any
-                where for any purpose.The Model is running on device and no server is involved.
+                Uploaded Images and video feed are not saved or collected
+                anywhere for any purpose. The model is running on device and no
+                server is involved.
               </li>
             </ul>
           </div>
-        </div>
-        <div className={styles.videoSection}>
-          <h4>Live Video Feed</h4>
-          <video ref={videoRef} autoPlay muted width={500} height={500} />
         </div>
       </div>
     </>
